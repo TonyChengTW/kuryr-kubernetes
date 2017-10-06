@@ -1,0 +1,600 @@
+Version:
+
+devstack branch : stable/ocata
+neutron-lbaas branch : stable/ocata
+kuryr-kubernetes tag : 0.1.0
+Linux OS : Ubuntu 16.04 LTS xenial
+================================================================
+devstack local.conf
+
+[[local|localrc]]                                                               
+LOGFILE=devstack.log
+LOG_COLOR=True
+ADMIN_PASSWORD=pass
+DATABASE_PASSWORD=pass
+RABBIT_PASSWORD=pass
+SERVICE_PASSWORD=pass
+SERVICE_TOKEN=pass
+IDENTITY_API_VERSION=3
+enable_plugin neutron-lbaas git://git.openstack.org/openstack/neutron-lbaas stable/ocata
+enable_plugin kuryr-kubernetes https://github.com/openstack/kuryr-kubernetes.git
+enable_service docker
+enable_service etcd
+enable_service kubernetes-api
+enable_service kubernetes-controller-manager
+enable_service kubernetes-scheduler
+enable_service kubelet
+enable_service kuryr-kubernetes
+enable_service q-lbaasv2
+NEUTRON_LBAAS_SERVICE_PROVIDERV2="LOADBALANCERV2:Haproxy:\
+neutron_lbaas.drivers.haproxy.plugin_driver.HaproxyOnHostPluginDriver:default" 
+
+================================================================
+root@kuryr1:/opt/devstack# git diff lib/cinder
+diff --git a/lib/cinder b/lib/cinder
+index 4ed98f8..ae5b5c0 100644
+--- a/lib/cinder
++++ b/lib/cinder
+@@ -82,7 +82,7 @@ CINDER_LVM_TYPE=${CINDER_LVM_TYPE:-default}
+ # comma-separated.
+ # The old ``CINDER_MULTI_LVM_BACKEND=True`` setting had a default of:
+ # CINDER_ENABLED_BACKENDS=${CINDER_ENABLED_BACKENDS:-lvm:lvmdriver-1,lvm:lvmdriver-2}
+-CINDER_ENABLED_BACKENDS=${CINDER_ENABLED_BACKENDS:-lvm:lvmdriver-1}
++CINDER_ENABLED_BACKENDS=${CINDER_ENABLED_BACKENDS:-lvm:default}
+
+================================================================
+
+stack@kuryr1:/opt/devstack$ source openrc admin admin
+WARNING: setting legacy OS_TENANT_NAME to support cli tools.
+
+stack@kuryr1:/opt/devstack$ openstack project list
++----------------------------------+--------------------+
+| ID                               | Name               |
++----------------------------------+--------------------+
+| 4ac0e71201924bbda4d05e8c05631c03 | demo               |
+| a356e0fdcefa47e483a33f6c8d08df35 | service            |
+| a383540170904f178acd21795a942183 | invisible_to_admin |
+| af2b691c76a7466fa72614a91e2e3098 | admin              |
+| e3f758a4f71e4dc0b696cae9c6bfb28f | alt_demo           |
++----------------------------------+--------------------+
+
+
+stack@kuryr1:/opt/devstack$ openstack user list
++----------------------------------+-----------+
+| ID                               | Name      |
++----------------------------------+-----------+
+| 094e35f6935049fc856879a1834921c5 | alt_demo  |
+| 12fffa90db2a4e35bef9354f3ba095af | demo      |
+| 1c6a7ede7e3f4ca58719a43342dfcd27 | nova      |
+| 3fce1d9dc8fb4fe9ae732266f7c4c6fa | placement |
+| 9c23ee2548104e0c8ea72d987b75e8d9 | cinder    |
+| 9efd61f73a6d4e80a531526ec4888d96 | glance    |
+| b64cb4ae08e9423baa7400647141607e | neutron   |
+| beaffcf97e904df083d674b0adb61342 | kuryr     |
+| cc939d363c0a4b84ba2d80ae620325d8 | admin     |
++----------------------------------+-----------+
+
+stack@kuryr1:/opt/devstack$  nova secgroup-add-rule default icmp -1 -1 0.0.0.0/0
+WARNING: Command secgroup-add-rule is deprecated and will be removed after Nova 15.0.0 is released. Use python-neutronclient or openstackclient instead.
++-------------+-----------+---------+-----------+--------------+
+| IP Protocol | From Port | To Port | IP Range  | Source Group |
++-------------+-----------+---------+-----------+--------------+
+| icmp        | -1        | -1      | 0.0.0.0/0 |              |
++-------------+-----------+---------+-----------+--------------+
+
+stack@kuryr1:/opt/devstack$ nova secgroup-add-rule default tcp 22 22 0.0.0.0/0
+WARNING: Command secgroup-add-rule is deprecated and will be removed after Nova 15.0.0 is released. Use python-neutronclient or openstackclient instead.
++-------------+-----------+---------+-----------+--------------+
+| IP Protocol | From Port | To Port | IP Range  | Source Group |
++-------------+-----------+---------+-----------+--------------+
+| tcp         | 22        | 22      | 0.0.0.0/0 |              |
++-------------+-----------+---------+-----------+--------------+
+
+stack@kuryr1:/opt/devstack$ nova secgroup-add-rule default tcp 80 80 0.0.0.0/0
+WARNING: Command secgroup-add-rule is deprecated and will be removed after Nova 15.0.0 is released. Use python-neutronclient or openstackclient instead.
++-------------+-----------+---------+-----------+--------------+
+| IP Protocol | From Port | To Port | IP Range  | Source Group |
++-------------+-----------+---------+-----------+--------------+
+| tcp         | 80        | 80      | 0.0.0.0/0 |              |
++-------------+-----------+---------+-----------+--------------+
+
+================================================================
+
+$ cat demo/Dockerfile                                                           
+FROM alpine                                                                     
+RUN apk add --no-cache python bash openssh-client curl                          
+COPY server.py /server.py                                                       
+ENTRYPOINT ["python", "/server.py"]  
+
+================================================================
+cat demo/server.py                                                            
+import BaseHTTPServer as http                                                   
+import platform                                                                 
+                                                                                
+class Handler(http.BaseHTTPRequestHandler):                                     
+  def do_GET(self):                                                             
+    self.send_response(200)                                                     
+    self.send_header('Content-Type', 'text/plain')                              
+    self.end_headers()                                                          
+    self.wfile.write("%s\n" % platform.node())                                  
+                                                                                
+if __name__ == '__main__':                                                      
+  httpd = http.HTTPServer(('', 7080), Handler)                                  
+  httpd.serve_forever()                                            
+====================================================================
+
+stack@kuryr1:~$ cd docker/
+stack@kuryr1:~/docker$ sudo docker build -t demo:demo .
+
+====================================================================
+stack@kuryr1:~/docker$ cat /etc/kuryr/kuryr.conf
+
+[kubernetes]
+api_root = http://192.168.141.141:8080
+
+[DEFAULT]
+use_stderr = true
+
+[neutron]
+memcached_servers = 192.168.141.141:11211
+signing_dir = /var/cache/kuryr
+cafile = /opt/stack/data/ca-bundle.pem
+auth_uri = http://192.168.141.141/identity
+project_domain_name = Default
+project_name = service
+user_domain_name = Default
+password = pass
+username = kuryr
+auth_url = http://192.168.141.141/identity_admin
+auth_type = password
+
+[neutron_defaults]
+ovs_bridge = br-int
+service_subnet = 1b034237-7085-4de4-970a-e274bd3ab870 <-- k8s-service-subnet
+pod_security_groups = 8d658464-cafb-4f66-b33f-b7e86a907145  <-- Default security group
+pod_subnet = 9bc7aabc-b4db-4001-90a9-8a6f279418c7  <-- private-subnet
+project = 4ac0e71201924bbda4d05e8c05631c03  <-- demo
+====================================================================
+stack@kuryr1:~/docker$ openstack subnet show 9bc7aabc-b4db-4001-90a9-8a6f279418c7
++-------------------+--------------------------------------+
+| Field             | Value                                |
++-------------------+--------------------------------------+
+| allocation_pools  | 10.0.0.2-10.0.0.62                   |
+| cidr              | 10.0.0.0/26                          |
+| created_at        | 2017-10-05T10:16:19Z                 |
+| description       |                                      |
+| dns_nameservers   |                                      |
+| enable_dhcp       | True                                 |
+| gateway_ip        | 10.0.0.1                             |
+| host_routes       |                                      |
+| id                | 9bc7aabc-b4db-4001-90a9-8a6f279418c7 |
+| ip_version        | 4                                    |
+| ipv6_address_mode | None                                 |
+| ipv6_ra_mode      | None                                 |
+| name              | private-subnet                       |
+| network_id        | e7a0c5d0-93d2-4092-bbde-6ca312f6d2c4 |
+| project_id        | 4ac0e71201924bbda4d05e8c05631c03     |
+| revision_number   | 2                                    |
+| segment_id        | None                                 |
+| service_types     |                                      |
+| subnetpool_id     | e7fd844a-d0ae-4632-9562-44d08a9f1af7 |
+| updated_at        | 2017-10-05T10:16:19Z                 |
++-------------------+--------------------------------------+
+====================================================================
+stack@kuryr1:~/docker$ service_subnet=$(iniget /etc/kuryr/kuryr.conf neutron_defaults service_subnet)
+stack@kuryr1:~/docker$ echo $service_subnet
+1b034237-7085-4de4-970a-e274bd3ab870
+
+stack@kuryr1:~/docker$ openstack subnet show $service_subnet
++-------------------+--------------------------------------+
+| Field             | Value                                |
++-------------------+--------------------------------------+
+| allocation_pools  |                                      |
+| cidr              | 10.0.0.64/26                         |
+| created_at        | 2017-10-05T10:19:36Z                 |
+| description       |                                      |
+| dns_nameservers   |                                      |
+| enable_dhcp       | False                                |
+| gateway_ip        | 10.0.0.126                           |
+| host_routes       |                                      |
+| id                | 1b034237-7085-4de4-970a-e274bd3ab870 |
+| ip_version        | 4                                    |
+| ipv6_address_mode | None                                 |
+| ipv6_ra_mode      | None                                 |
+| name              | k8s-service-subnet                   |
+| network_id        | e7a0c5d0-93d2-4092-bbde-6ca312f6d2c4 |
+| project_id        | 4ac0e71201924bbda4d05e8c05631c03     |
+| revision_number   | 3                                    |
+| segment_id        | None                                 |
+| service_types     |                                      |
+| subnetpool_id     | e7fd844a-d0ae-4632-9562-44d08a9f1af7 |
+| updated_at        | 2017-10-05T10:19:40Z                 |
++-------------------+--------------------------------------+
+
+====================================================================
+stack@kuryr1:~/docker$ ps -eoargs|grep apiserver
+/hyperkube apiserver --service-cluster-ip-range=10.0.0.64/26 --insecure-bind-address=0.0.0.0 --insecure-port=8080 --etcd-servers=http://192.168.141.141:2379 --admission-control=NamespaceLifecycle,LimitRanger,ServiceAccount,ResourceQuota --client-ca-file=/srv/kubernetes/ca.crt --basic-auth-file=/srv/kubernetes/basic_auth.csv --min-request-timeout=300 --tls-cert-file=/srv/kubernetes/server.cert --tls-private-key-file=/srv/kubernetes/server.key --token-auth-file=/srv/kubernetes/known_tokens.csv --allow-privileged=true --v=2 --logtostderr=true
+grep --color=auto apiserver
+
+====================================================================
+stack@kuryr1:~/docker$ openstack image list
++--------------------------------------+---------------------------------+--------+
+| ID                                   | Name                            | Status |
++--------------------------------------+---------------------------------+--------+
+| 69503302-239d-4cf5-8b59-b331809996f9 | cirros-0.3.4-x86_64-uec         | active |
+| 07aab079-1abe-4eb2-ad67-711d3f7c7fe4 | cirros-0.3.4-x86_64-uec-kernel  | active |
+| 49921e10-d07b-4a94-96b8-444ba983d9a0 | cirros-0.3.4-x86_64-uec-ramdisk | active |
++--------------------------------------+---------------------------------+--------+
+stack@kuryr1:~/docker$ openstack network list
++--------------------------------------+---------+------------------------------------------------------------------------------------------------------------------+
+| ID                                   | Name    | Subnets                                                                                                          |
++--------------------------------------+---------+------------------------------------------------------------------------------------------------------------------+
+| 9205c02c-fa34-487f-8005-4b80675bb195 | public  | 35eb81e6-f32c-4f96-bb81-faebf7cdf8a6, 74a60cf8-4994-4f01-928a-da2290692952                                       |
+| e7a0c5d0-93d2-4092-bbde-6ca312f6d2c4 | private | 1b034237-7085-4de4-970a-e274bd3ab870, 32d0bcef-c6a5-48e2-b7ad-8b73e4b0e79f, 9bc7aabc-b4db-4001-90a9-8a6f279418c7 |
++--------------------------------------+---------+------------------------------------------------------------------------------------------------------------------+
+====================================================================
+stack@kuryr1:~/docker$ nova boot --flavor 1 --image 69503302-239d-4cf5-8b59-b331809996f9 --nic net-id=e7a0c5d0-93d2-4092-bbde-6ca312f6d2c4 --config-drive=true testvm
++--------------------------------------+----------------------------------------------------------------+
+| Property                             | Value                                                          |
++--------------------------------------+----------------------------------------------------------------+
+| OS-DCF:diskConfig                    | MANUAL                                                         |
+| OS-EXT-AZ:availability_zone          |                                                                |
+| OS-EXT-SRV-ATTR:host                 | -                                                              |
+| OS-EXT-SRV-ATTR:hostname             | testvm                                                         |
+| OS-EXT-SRV-ATTR:hypervisor_hostname  | -                                                              |
+| OS-EXT-SRV-ATTR:instance_name        |                                                                |
+| OS-EXT-SRV-ATTR:kernel_id            | 07aab079-1abe-4eb2-ad67-711d3f7c7fe4                           |
+| OS-EXT-SRV-ATTR:launch_index         | 0                                                              |
+| OS-EXT-SRV-ATTR:ramdisk_id           | 49921e10-d07b-4a94-96b8-444ba983d9a0                           |
+| OS-EXT-SRV-ATTR:reservation_id       | r-icn3oubp                                                     |
+| OS-EXT-SRV-ATTR:root_device_name     | -                                                              |
+| OS-EXT-SRV-ATTR:user_data            | -                                                              |
+| OS-EXT-STS:power_state               | 0                                                              |
+| OS-EXT-STS:task_state                | scheduling                                                     |
+| OS-EXT-STS:vm_state                  | building                                                       |
+| OS-SRV-USG:launched_at               | -                                                              |
+| OS-SRV-USG:terminated_at             | -                                                              |
+| accessIPv4                           |                                                                |
+| accessIPv6                           |                                                                |
+| adminPass                            | hvGv257nFYRb                                                   |
+| config_drive                         | True                                                           |
+| created                              | 2017-10-06T01:46:46Z                                           |
+| description                          | -                                                              |
+| flavor                               | m1.tiny (1)                                                    |
+| hostId                               |                                                                |
+| host_status                          |                                                                |
+| id                                   | 50a12b8d-8433-47c2-8674-6fa0454ecc92                           |
+| image                                | cirros-0.3.4-x86_64-uec (69503302-239d-4cf5-8b59-b331809996f9) |
+| key_name                             | -                                                              |
+| locked                               | False                                                          |
+| metadata                             | {}                                                             |
+| name                                 | testvm                                                         |
+| os-extended-volumes:volumes_attached | []                                                             |
+| progress                             | 0                                                              |
+| security_groups                      | 8d658464-cafb-4f66-b33f-b7e86a907145                           |
+| status                               | BUILD                                                          |
+| tags                                 | []                                                             |
+| tenant_id                            | af2b691c76a7466fa72614a91e2e3098                               |
+| updated                              | 2017-10-06T01:46:46Z                                           |
+| user_id                              | cc939d363c0a4b84ba2d80ae620325d8                               |
++--------------------------------------+----------------------------------------------------------------+
+
+stack@kuryr1:/opt/devstack$ nova list
++--------------------------------------+--------+--------+------------+-------------+-------------------------------------------------------+
+| ID                                   | Name   | Status | Task State | Power State | Networks                                              |
++--------------------------------------+--------+--------+------------+-------------+-------------------------------------------------------+
+| a7ab6785-1a8d-4e7e-b316-ddc78ed81e74 | testvm | ACTIVE | -          | Running     | private=fd7b:83d1:e8e:0:f816:3eff:fea7:b5f5, 10.0.0.5 |
++--------------------------------------+--------+--------+------------+-------------+-------------------------------------------------------+
+
+
+====================================================================
+$ kubectl run demo --image=demo:demo
+stack@kuryr1:~$ openstack port list --device-owner kuryr:container
++--------------------------------------+-----------------------+-------------------+----------------------------------------------------------------------------------------------------+--------+
+| ID                                   | Name                  | MAC Address       | Fixed IP Addresses                                                                                 | Status |
++--------------------------------------+-----------------------+-------------------+----------------------------------------------------------------------------------------------------+--------+
+| 215855a8-306a-4d61-9755-388915b89a3c | demo-2945424114-w1vsf | fa:16:3e:ec:73:11 | ip_address='10.0.0.3', subnet_id='9bc7aabc-b4db-4001-90a9-8a6f279418c7'                            | ACTIVE |
+|                                      |                       |                   | ip_address='fd7b:83d1:e8e:0:f816:3eff:feec:7311', subnet_id='32d0bcef-c6a5-48e2-b7ad-8b73e4b0e79f' |        |
++--------------------------------------+-----------------------+-------------------+----------------------------------------------------------------------------------------------------+--------+
+====================================================================
+
+stack@kuryr1:~$ openstack port show 215855a8-306a-4d61-9755-388915b89a3c
++-----------------------+----------------------------------------------------------------------------------------------------+
+| Field                 | Value                                                                                              |
++-----------------------+----------------------------------------------------------------------------------------------------+
+| admin_state_up        | UP                                                                                                 |
+| allowed_address_pairs |                                                                                                    |
+| binding_host_id       | kuryr1                                                                                             |
+| binding_profile       |                                                                                                    |
+| binding_vif_details   | ovs_hybrid_plug='True', port_filter='True'                                                         |
+| binding_vif_type      | ovs                                                                                                |
+| binding_vnic_type     | normal                                                                                             |
+| created_at            | 2017-10-06T02:39:31Z                                                                               |
+| description           |                                                                                                    |
+| device_id             | 93ff54c4-aa3f-11e7-b385-005056853608                                                               |
+| device_owner          | kuryr:container                                                                                    |
+| dns_assignment        | None                                                                                               |
+| dns_name              | None                                                                                               |
+| extra_dhcp_opts       |                                                                                                    |
+| fixed_ips             | ip_address='10.0.0.3', subnet_id='9bc7aabc-b4db-4001-90a9-8a6f279418c7'                            |
+|                       | ip_address='fd7b:83d1:e8e:0:f816:3eff:feec:7311', subnet_id='32d0bcef-c6a5-48e2-b7ad-8b73e4b0e79f' |
+| id                    | 215855a8-306a-4d61-9755-388915b89a3c                                                               |
+| ip_address            | None                                                                                               |
+| mac_address           | fa:16:3e:ec:73:11                                                                                  |
+| name                  | demo-2945424114-w1vsf                                                                              |
+| network_id            | e7a0c5d0-93d2-4092-bbde-6ca312f6d2c4                                                               |
+| option_name           | None                                                                                               |
+| option_value          | None                                                                                               |
+| port_security_enabled | True                                                                                               |
+| project_id            | 4ac0e71201924bbda4d05e8c05631c03                                                                   |
+| qos_policy_id         | None                                                                                               |
+| revision_number       | 9                                                                                                  |
+| security_groups       | 8d658464-cafb-4f66-b33f-b7e86a907145                                                               |
+| status                | ACTIVE                                                                                             |
+| subnet_id             | None                                                                                               |
+| updated_at            | 2017-10-06T02:39:37Z                                                                               |
++-----------------------+----------------------------------------------------------------------------------------------------+
+
+ ====================================================================                                                    
+$ kubectl get pods -l run=demo                                                  
+NAME                    READY     STATUS    RESTARTS   AGE                      
+demo-2945424114-00vca   1/1       Running   0          25s           
+
+====================================================================
+
+stack@kuryr1:~$ sudo docker ps -a
+CONTAINER ID        IMAGE                                             COMMAND                  CREATED             STATUS              PORTS               NAMES
+eec00c2643a5        demo:demo                                         "python /server.py"      3 minutes ago       Up 3 minutes                            k8s_demo.13be10e8_demo-2945424114-w1vsf_default_93ff54c4-aa3f-11e7-b385-005056853608_667387bc
+
+====================================================================
+stack@kuryr1:~$ sudo docker inspect eec00c2643a5
+[
+
+        "Name": "/k8s_demo.13be10e8_demo-2945424114-w1vsf_default_93ff54c4-aa3f-11e7-b385-005056853608_667387bc",
+        "RestartCount": 0,
+        "Driver": "overlay2",
+        "Platform": "linux",
+            "NetworkMode": "container:9d60c6435fba6513e6783082eb35e522991aa6f553fef17f2df027cdaa6ee52c",
+            "PortBindings": null,
+
+        ],
+
+            "Env": [
+                "KUBERNETES_SERVICE_PORT=443",
+                "KUBERNETES_SERVICE_PORT_HTTPS=443",
+                "KUBERNETES_PORT=tcp://10.0.0.65:443",
+                "KUBERNETES_PORT_443_TCP=tcp://10.0.0.65:443",
+                "KUBERNETES_PORT_443_TCP_PROTO=tcp",
+                "KUBERNETES_PORT_443_TCP_PORT=443",
+                "KUBERNETES_PORT_443_TCP_ADDR=10.0.0.65",
+                "KUBERNETES_SERVICE_HOST=10.0.0.65",
+                "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            ],
+
+        "NetworkSettings": {
+            "Bridge": "",
+            "SandboxID": "",
+            "HairpinMode": false,
+            "LinkLocalIPv6Address": "",
+            "LinkLocalIPv6PrefixLen": 0,
+            "Ports": {},
+            "SandboxKey": "",
+            "SecondaryIPAddresses": null,
+            "SecondaryIPv6Addresses": null,
+            "EndpointID": "",
+            "Gateway": "",
+            "GlobalIPv6Address": "",
+            "GlobalIPv6PrefixLen": 0,
+            "IPAddress": "",
+            "IPPrefixLen": 0,
+            "IPv6Gateway": "",
+            "MacAddress": "",
+            "Networks": {}
+        }
+    }
+]
+
+====================================================================
+
+stack@kuryr1:~$ kubectl get all --all-namespaces
+NAMESPACE   NAME             CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+default     svc/kubernetes   10.0.0.65    <none>        443/TCP   16h
+NAMESPACE   NAME                       READY     STATUS    RESTARTS   AGE
+default     po/demo-2945424114-w1vsf   1/1       Running   0          9m
+====================================================================
+stack@kuryr1:~$ pod=$(kubectl get pods -l run=demo -o jsonpath='{.items[].metadata.name}') 
+stack@kuryr1:~$ pod_ip=$(kubectl get pod $pod -o jsonpath='{.status.podIP}')
+stack@kuryr1:~$ echo Pod $pod IP is $pod_ip
+Pod demo-2945424114-w1vsf IP is 10.0.0.3
+
+stack@kuryr1:~$ openstack port show $pod
++-----------------------+----------------------------------------------------------------------------------------------------+
+| Field                 | Value                                                                                              |
++-----------------------+----------------------------------------------------------------------------------------------------+
+| admin_state_up        | UP                                                                                                 |
+| allowed_address_pairs |                                                                                                    |
+| binding_host_id       | kuryr1                                                                                             |
+| binding_profile       |                                                                                                    |
+| binding_vif_details   | ovs_hybrid_plug='True', port_filter='True'                                                         |
+| binding_vif_type      | ovs                                                                                                |
+| binding_vnic_type     | normal                                                                                             |
+| created_at            | 2017-10-06T02:39:31Z                                                                               |
+| description           |                                                                                                    |
+| device_id             | 93ff54c4-aa3f-11e7-b385-005056853608                                                               |
+| device_owner          | kuryr:container                                                                                    |
+| dns_assignment        | None                                                                                               |
+| dns_name              | None                                                                                               |
+| extra_dhcp_opts       |                                                                                                    |
+| fixed_ips             | ip_address='10.0.0.3', subnet_id='9bc7aabc-b4db-4001-90a9-8a6f279418c7'                            |
+|                       | ip_address='fd7b:83d1:e8e:0:f816:3eff:feec:7311', subnet_id='32d0bcef-c6a5-48e2-b7ad-8b73e4b0e79f' |
+| id                    | 215855a8-306a-4d61-9755-388915b89a3c                                                               |
+| ip_address            | None                                                                                               |
+| mac_address           | fa:16:3e:ec:73:11                                                                                  |
+| name                  | demo-2945424114-w1vsf                                                                              |
+| network_id            | e7a0c5d0-93d2-4092-bbde-6ca312f6d2c4                                                               |
+| option_name           | None                                                                                               |
+| option_value          | None                                                                                               |
+| port_security_enabled | True                                                                                               |
+| project_id            | 4ac0e71201924bbda4d05e8c05631c03                                                                   |
+| qos_policy_id         | None                                                                                               |
+| revision_number       | 9                                                                                                  |
+| security_groups       | 8d658464-cafb-4f66-b33f-b7e86a907145                                                               |
+| status                | ACTIVE                                                                                             |
+| subnet_id             | None                                                                                               |
+| updated_at            | 2017-10-06T02:39:37Z                                                                               |
++-----------------------+----------------------------------------------------------------------------------------------------+
+================================================================
+Let's now expose the 'demo' deployment.                                     
+                                                                          
+$ kubectl expose deployment demo --port=80 --target-port=7080                   
+service "demo" exposed  
+================================================================
+stack@kuryr1:~$ kubectl get service
+NAME         CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+demo         10.0.0.90    <none>        80/TCP    14s
+kubernetes   10.0.0.65    <none>        443/TCP   16h
+================================================================
+stack@kuryr1:~$ kubectl get endpoints demo
+NAME         ENDPOINTS              AGE
+demo         10.0.0.3:7080          1m
+================================================================
+stack@kuryr1:~$ neutron lbaas-loadbalancer-list
+neutron CLI is deprecated and will be removed in the future. Use openstack CLI instead.
++--------------------------------------+--------------+----------------------------------+-------------+---------------------+----------+
+| id                                   | name         | tenant_id                        | vip_address | provisioning_status | provider |
++--------------------------------------+--------------+----------------------------------+-------------+---------------------+----------+
+| c9e9d70c-fa41-4c98-b4ff-0ba70fd3e1dd | default/demo | 4ac0e71201924bbda4d05e8c05631c03 | 10.0.0.90   | ACTIVE              | haproxy  |
++--------------------------------------+--------------+----------------------------------+-------------+---------------------+----------+
+================================================================
+stack@kuryr1:~/docker$ neutron lbaas-listener-list
+neutron CLI is deprecated and will be removed in the future. Use openstack CLI instead.
++--------------------------------------+--------------------------------------+---------------------+----------------------------------+----------+---------------+----------------+
+| id                                   | default_pool_id                      | name                | tenant_id                        | protocol | protocol_port | admin_state_up |
++--------------------------------------+--------------------------------------+---------------------+----------------------------------+----------+---------------+----------------+
+| 132bff2c-4f2d-4635-ad1e-5f4d3d8f584c | e9992ed2-c4be-4ddb-9042-d57e27bfe8bd | default/demo:TCP:80 | 4ac0e71201924bbda4d05e8c05631c03 | TCP      |            80 | True           |
++--------------------------------------+--------------------------------------+---------------------+----------------------------------+----------+---------------+----------------+
+================================================================
+stack@kuryr1:~/docker$ neutron lbaas-pool-list
+neutron CLI is deprecated and will be removed in the future. Use openstack CLI instead.
++--------------------------------------+---------------------+----------------------------------+--------------+----------+----------------+
+| id                                   | name                | tenant_id                        | lb_algorithm | protocol | admin_state_up |
++--------------------------------------+---------------------+----------------------------------+--------------+----------+----------------+
+| e9992ed2-c4be-4ddb-9042-d57e27bfe8bd | default/demo:TCP:80 | 4ac0e71201924bbda4d05e8c05631c03 | ROUND_ROBIN  | TCP      | True           |
++--------------------------------------+---------------------+----------------------------------+--------------+----------+----------------+
+================================================================
+stack@kuryr1:~/docker$ neutron lbaas-member-list default/demo:TCP:80
+neutron CLI is deprecated and will be removed in the future. Use openstack CLI instead.
++--------------------------------------+------------------------------------+----------------------------------+----------+---------------+--------+--------------------------------------+----------------+
+| id                                   | name                               | tenant_id                        | address  | protocol_port | weight | subnet_id                            | admin_state_up |
++--------------------------------------+------------------------------------+----------------------------------+----------+---------------+--------+--------------------------------------+----------------+
+| 72afe726-b7a0-45e5-ba0c-9b4b48fba3bc | default/demo-2945424114-w1vsf:7080 | 4ac0e71201924bbda4d05e8c05631c03 | 10.0.0.3 |          7080 |      1 | 9bc7aabc-b4db-4001-90a9-8a6f279418c7 | True           |
++--------------------------------------+------------------------------------+----------------------------------+----------+---------------+--------+--------------------------------------+----------------+
+================================================================
+Let's now scale the 'demo' deployment.
+
+stack@kuryr1:~/docker$ kubectl scale deployment demo --replicas=2
+deployment "demo" scaled
+
+stack@kuryr1:~/docker$ kubectl get deployment demo
+NAME      DESIRED   CURRENT   UP-TO-DATE   AVAILABLE   AGE
+demo      2         2         2            2           42m
+================================================================
+
+stack@kuryr1:~/docker$ neutron lbaas-member-list default/demo:TCP:80
+neutron CLI is deprecated and will be removed in the future. Use openstack CLI instead.
++--------------------------------------+------------------------------------+----------------------------------+----------+---------------+--------+--------------------------------------+----------------+
+| id                                   | name                               | tenant_id                        | address  | protocol_port | weight | subnet_id                            | admin_state_up |
++--------------------------------------+------------------------------------+----------------------------------+----------+---------------+--------+--------------------------------------+----------------+
+| 72afe726-b7a0-45e5-ba0c-9b4b48fba3bc | default/demo-2945424114-w1vsf:7080 | 4ac0e71201924bbda4d05e8c05631c03 | 10.0.0.3 |          7080 |      1 | 9bc7aabc-b4db-4001-90a9-8a6f279418c7 | True           |
+| 22fb1044-b7e0-46a3-bd39-bfb8d8f2b4f4 | default/demo-2945424114-obhm9:7080 | 4ac0e71201924bbda4d05e8c05631c03 | 10.0.0.9 |          7080 |      1 | 9bc7aabc-b4db-4001-90a9-8a6f279418c7 | True           |
++--------------------------------------+------------------------------------+----------------------------------+----------+---------------+--------+--------------------------------------+----------------+
+================================================================
+stack@kuryr1:~/docker$ openstack port list --device-owner kuryr:container
++--------------------------------------+-----------------------+-------------------+----------------------------------------------------------------------------------------------------+--------+
+| ID                                   | Name                  | MAC Address       | Fixed IP Addresses                                                                                 | Status |
++--------------------------------------+-----------------------+-------------------+----------------------------------------------------------------------------------------------------+--------+
+| 215855a8-306a-4d61-9755-388915b89a3c | demo-2945424114-w1vsf | fa:16:3e:ec:73:11 | ip_address='10.0.0.3', subnet_id='9bc7aabc-b4db-4001-90a9-8a6f279418c7'                            | ACTIVE |
+|                                      |                       |                   | ip_address='fd7b:83d1:e8e:0:f816:3eff:feec:7311', subnet_id='32d0bcef-c6a5-48e2-b7ad-8b73e4b0e79f' |        |
+| 44870d29-6ec9-4b18-b1cc-b18d22a749d8 | demo-2945424114-obhm9 | fa:16:3e:5b:ea:0a | ip_address='10.0.0.9', subnet_id='9bc7aabc-b4db-4001-90a9-8a6f279418c7'                            | ACTIVE |
+|                                      |                       |                   | ip_address='fd7b:83d1:e8e:0:f816:3eff:fe5b:ea0a', subnet_id='32d0bcef-c6a5-48e2-b7ad-8b73e4b0e79f' |        |
++--------------------------------------+-----------------------+-------------------+----------------------------------------------------------------------------------------------------+--------+
+================================================================
+stack@kuryr1:~/docker$ kubectl get endpoints demo
+NAME      ENDPOINTS                     AGE
+demo      10.0.0.3:7080,10.0.0.9:7080   18m
+================================================================
+
+Verify network by login to one of the Pods:
+
+stack@kuryr1:~/docker$ kubectl get pods
+NAME                    READY     STATUS    RESTARTS   AGE
+demo-2945424114-obhm9   1/1       Running   0          10m
+demo-2945424114-w1vsf   1/1       Running   0          52m
+stack@kuryr1:~/docker$ kubectl exec -it demo-2945424114-obhm9 -- bash
+bash-4.3# 
+
+bash-4.3# ifconfig
+eth0      Link encap:Ethernet  HWaddr FA:16:3E:5B:EA:0A  
+          inet addr:10.0.0.9  Bcast:0.0.0.0  Mask:255.255.255.192
+          UP BROADCAST RUNNING  MTU:1450  Metric:1
+          RX packets:22 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:0 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1000 
+          RX bytes:2500 (2.4 KiB)  TX bytes:0 (0.0 B)
+
+lo        Link encap:Local Loopback  
+          inet addr:127.0.0.1  Mask:255.0.0.0
+          UP LOOPBACK RUNNING  MTU:65536  Metric:1
+          RX packets:0 errors:0 dropped:0 overruns:0 frame:0
+          TX packets:0 errors:0 dropped:0 overruns:0 carrier:0
+          collisions:0 txqueuelen:1 
+          RX bytes:0 (0.0 B)  TX bytes:0 (0.0 B)
+
+
+bash-4.3# curl http://127.0.0.1:7080
+demo-2945424114-obhm9
+
+bash-4.3# curl http://10.0.0.90:80
+demo-2945424114-obhm9
+bash-4.3# curl http://10.0.0.90:80
+demo-2945424114-w1vsf
+bash-4.3# curl http://10.0.0.90:80
+demo-2945424114-obhm9
+bash-4.3# curl http://10.0.0.90:80
+demo-2945424114-w1vsf
+
+bash-4.3# ping 10.0.0.5
+PING 10.0.0.5 (10.0.0.5): 56 data bytes
+64 bytes from 10.0.0.5: seq=0 ttl=64 time=2.456 ms
+64 bytes from 10.0.0.5: seq=1 ttl=64 time=0.554 ms
+64 bytes from 10.0.0.5: seq=2 ttl=64 time=0.621 ms
+^C
+--- 10.0.0.5 ping statistics ---
+3 packets transmitted, 3 packets received, 0% packet loss
+round-trip min/avg/max = 0.554/1.210/2.456 ms
+
+bash-4.3# ssh cirros@10.0.0.5
+The authenticity of host '10.0.0.5 (10.0.0.5)' can't be established.
+RSA key fingerprint is SHA256:qkCIWJwum7zdo3PC2iWccQAf9W44thcHXYw2ccdI4G4.
+Are you sure you want to continue connecting (yes/no)? yes
+Warning: Permanently added '10.0.0.5' (RSA) to the list of known hosts.
+cirros@10.0.0.5's password: 
+$ ping 10.0.0.90
+PING 10.0.0.90 (10.0.0.90): 56 data bytes
+64 bytes from 10.0.0.90: seq=0 ttl=63 time=1.652 ms
+64 bytes from 10.0.0.90: seq=1 ttl=63 time=0.922 ms
+^C
+--- 10.0.0.90 ping statistics ---
+2 packets transmitted, 2 packets received, 0% packet loss
+round-trip min/avg/max = 0.922/1.287/1.652 ms
+
+$ curl http://10.0.0.90:80
+demo-2945424114-obhm9
+$ curl http://10.0.0.90:80
+demo-2945424114-w1vsf
+$ curl http://10.0.0.90:80
+demo-2945424114-obhm9
+$ curl http://10.0.0.90:80
+demo-2945424114-w1vsf
+================================================================
+
